@@ -9,12 +9,12 @@ type Credentials = {
     Ip: string
   }
 
-type ApiResponseDomainCheckResult = XmlProvider<"""<?xml version="1.0" encoding="utf-8"?>
+type ApiResponseDomainCheck = XmlProvider<"""<?xml version="1.0" encoding="utf-8"?>
 <ApiResponse Status="OK" xmlns="http://api.namecheap.com/xml.response">
     <Errors />
     <Warnings />
     <RequestedCommand>namecheap.domains.check</RequestedCommand>
-        <CommandResponse Type="namecheap.domains.check">
+    <CommandResponse Type="namecheap.domains.check">
         <DomainCheckResult Domain="arwn.com" Available="true" ErrorNo="0" Description="" IsPremiumName="false" PremiumRegistrationPrice="0" PremiumRenewalPrice="0" PremiumRestorePrice="0" PremiumTransferPrice="0" IcannFee="0" EapFee="0.0" />
         <DomainCheckResult Domain="arwn.co" Available="true" ErrorNo="0" Description="" IsPremiumName="false" PremiumRegistrationPrice="0" PremiumRenewalPrice="0" PremiumRestorePrice="0" PremiumTransferPrice="0" IcannFee="0" EapFee="0.0" />
     </CommandResponse>
@@ -23,10 +23,11 @@ type ApiResponseDomainCheckResult = XmlProvider<"""<?xml version="1.0" encoding=
     <ExecutionTime>0.522</ExecutionTime>
 </ApiResponse>""">
 
-let commandDomainsCheck domains =
+let checkDomains domains =
     domains
     |> String.concat ","
     |> sprintf "&Command=namecheap.domains.check&DomainList=%s"
+
 
 let makeURI c rest =
     sprintf
@@ -38,30 +39,39 @@ let makeURI c rest =
         rest
 
 let domainNamesAreAvailable domainName c =
+    let tryParse x =
+        try Ok (ApiResponseDomainCheck.Parse x)
+        with ex -> Error "Could not parse the xml recieved from the namecheap api"
     domainName
-    |> commandDomainsCheck
+    |> checkDomains
     |> makeURI c
     |> Http.RequestString
-    |> try ApiResponseDomainCheckResult.Parse with e -> failwith "couldnt parse result from namecheap's api"
-    |> fun x -> x.CommandResponse.DomainCheckResults
-    |> Seq.map (fun x -> x.Available.ToString())
+    |> tryParse
 
 let getCredentials () =
     let userName = Environment.GetEnvironmentVariable "ncqUserName"
     let key = Environment.GetEnvironmentVariable "ncqKey"
     let ip = Environment.GetEnvironmentVariable "ncqIp"
     if isNull userName || isNull key || isNull ip then
-        failwith "Could not read credentials, please set the environment variables [ncqUserName, ncqKey, ncqIP]"
+        Error "Could not read credentials, please set the environment variables [ncqUserName, ncqKey, ncqIP]"
     else
-        { UserName = userName
-          Key = key
-          Ip = ip
-        }
+        Ok { UserName = userName
+             Key = key
+             Ip = ip
+           }
+
+// TODO: ew type signatures grodey dude
+let prettyPrintDomains (parsedDomains:ApiResponseDomainCheck.ApiResponse) =
+    let prettyPrint (r:ApiResponseDomainCheck.DomainCheckResult) =
+        let available = (if r.Available then "" else "not ") + "available"
+        let cost = if r.Available && r.IsPremiumName then "at $" + r.PremiumRegistrationPrice.ToString() else ""
+        printfn "%s is %s %s" r.Domain available cost
+    Seq.iter prettyPrint parsedDomains.CommandResponse.DomainCheckResults
 
 [<EntryPoint>]
 let main argv =
     getCredentials()
-    |> domainNamesAreAvailable argv
-    |> Seq.zip argv
-    |> Seq.iter (fun (f,s) -> printfn "%s avaliable: %s" f s)
-    0
+    |> Result.bind (domainNamesAreAvailable argv)
+    |> function
+        | Ok parsedDomains -> prettyPrintDomains parsedDomains |> ignore; 0
+        | Error e -> printfn "%s" e; 1
